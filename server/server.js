@@ -5,11 +5,25 @@ const session = require('express-session');
 const cookieParser = require('cookie-parser');
 const bcrypt = require('bcrypt');
 const bodyParser = require('body-parser');
+const multer = require('multer');
+const fs = require('fs');
+const path = require('path');
+
 
 const app = express();
 const port = 5000;
+const storage = multer.diskStorage({
+     destination: function (req, file, cb) {
+        return cb(null, "./AuctionImage")
+     },
+     filename: function (req, file, cb) {
+        return cb(null, `${file.originalname}`)
+     }
+});
+const upload = multer({storage})
 
 // Middleware for parsing form data
+app.use('/images', express.static('./AuctionImage'));
 app.use(express.json());
 app.use(bodyParser.json());
 app.use(cookieParser());
@@ -86,9 +100,6 @@ app.post('/api/signup', (req, res) => {
         }
         console.log('Fetched records:', results);
         const users = results;
-
-        
-
         // Find user by username
         const user = users.find(user => user.email === username);
         if (!user) {
@@ -113,6 +124,26 @@ app.post('/api/signup', (req, res) => {
     });
 });
 
+app.post('/api/createAuction', upload.single('file'), (req, res) => {
+    const { uid, title, description, category, startingPrice, reservePrice, maxBids, auctionStarts, auctionEnds, file } = req.body;
+    // Check if files were uploaded
+    if (!req.file || req.file.length === 0) {
+        return res.json({ error: 'No files were uploaded' });
+    }
+    console.log('File uploaded:', req.file.originalname);
+
+    // Insert auction details into database
+    connection.query('INSERT INTO auction_dets (uid, title, description, category, startPrice, increment, maxBids, startTime, endTime, image, bids, currentVal) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)', 
+        [uid, title, description, category, startingPrice, reservePrice, maxBids, auctionStarts, auctionEnds, req.file.originalname, startingPrice], 
+        (error, results) => {
+            if (error) {
+                return res.json({ error: 'Error creating auction', details: error });
+            }
+            res.json({ login: 'success', message: 'Auction created successfully' });
+        }
+    );
+});
+
 // Protected route
 app.get('/api/protected', (req, res) => {
     if (req.session && req.session.userId) {
@@ -122,6 +153,150 @@ app.get('/api/protected', (req, res) => {
     else{
         res.json({login:"denied" });
     }
+});
+
+app.get('/api/getAuctionDets', (req, res) => {
+    const {id, uid} = req.query;
+    connection.query(`SELECT * FROM auction_dets where id = ?`, [id], (error, results, fields) => {
+        if (error) {
+            console.error('Error fetching records:', error);
+            return;
+        }
+        const auction = results;
+        connection.query(`SELECT * FROM bid where aid = ?`, [id], (error, results, fields) => {
+            if (error) {
+                console.error('Error fetching records:', error);
+                return;
+            }
+            const auctions = results;
+    
+            if (!auction) {
+                return res.json({status: 'ok', message: 'Not found any auction'});
+            }
+            else{
+                let totalBids = auctions.length
+                connection.query(`SELECT * FROM bid where aid = ? and uid = ?`, [id, uid], (error, results, fields) => {
+                    if (error) {
+                        console.error('Error fetching records:', error);
+                        return;
+                    }
+                    const auctionsSort = results;
+            
+                    if (!auction) {
+                        return res.json({status: 'ok', message: 'Not found any auction'});
+                    }
+                    else{
+                        let selfBids = 0
+                        if (auctionsSort.length) {
+                            selfBids = auction[0].maxBids - auctionsSort[0].bidleft
+                            
+                        }
+                        connection.query(`SELECT comment.comment, log_details.name FROM comment JOIN log_details ON comment.uid = log_details.id where comment.aid = ?`, [id], (error, results, fields) => {
+                            if (error) {
+                                console.error('Error fetching records:', error);
+                                return;
+                            }
+                            const comments = results;
+                    
+                            if (!auction) {
+                                return res.json({status: 'ok', message: 'Not found any auction'});
+                            }
+                            else{
+                                return res.json({records: auction[0], totalBids: totalBids, selfBids: selfBids, comments:comments})
+                            }
+                        });
+                    }
+                });
+            }
+        });
+    });
+});
+
+app.post('/api/placeBid', (req, res) => {
+    const {uid, aid, newVal, bidLeft} = req.body;
+    connection.query(`SELECT * FROM bid where uid = ? and aid = ?`, [uid, aid], (error, results, fields) => {
+        if (error) {
+            console.error('Error fetching records:', error);
+            return;
+        }
+        let auctions = results;
+        const auction = auctions.find(auction => auction.bidleft > 0);
+
+        if (!auction) {
+            connection.query(`INSERT INTO bid(uid, aid, price, bidleft) VALUES (?,?,?,?)`, [uid, aid, newVal, bidLeft], (error, results, fields) => {
+                if (error) {
+                    console.error('Error fetching records:', error);
+                    return;
+                }
+                else{
+                    connection.query(`UPDATE auction_dets SET currentVal = ? WHERE id = ?`, [newVal, aid], (error, results, fields) => {
+                        if (error) {
+                            console.error('Error fetching records:', error);
+                            return;
+                        }
+                        else{
+                            return res.json({status: 'ok'});
+                        }
+                    });
+                }
+            });
+        }
+        else{
+                connection.query(`UPDATE bid SET price = ?, bidleft = ? WHERE uid = ? and aid = ?`, [newVal, auction.bidleft-1, uid, aid], (error, results, fields) => {
+                    if (error) {
+                        console.error('Error fetching records:', error);
+                        return;
+                    }
+                    else{
+                        connection.query(`UPDATE auction_dets SET currentVal = ? WHERE id = ?`, [newVal, aid], (error, results, fields) => {
+                            if (error) {
+                                console.error('Error fetching records:', error);
+                                return;
+                            }
+                            else{
+                                return res.json({status: 'ok'});
+                            }
+                        });
+                    }
+                });
+        }
+    });
+});
+
+app.post('/api/addComment', (req, res) => {
+    const {uid, aid, commentval} = req.body;
+    connection.query(`INSERT INTO comment(uid, aid, comment) VALUES (?,?,?)`, [uid, aid, commentval], (error, results, fields) => {
+        if (error) {
+            console.error('Error fetching records:', error);
+            return;
+        }
+        else{
+            return res.json({status: 'ok'});
+        }
+    });
+});
+
+app.get('/api/getLiveSlider', (req, res) => {
+    const currentDate = new Date();
+    connection.query(`SELECT * FROM auction_dets where startTime <= ? and endTime >= ?`, [currentDate, currentDate], (error, results, fields) => {
+        if (error) {
+            console.error('Error fetching records:', error);
+            return;
+        }
+        const auctions = results;
+
+        // Find user by username
+        let jsonData = auctions.map(row => {
+            return row;
+        });
+        if (!jsonData) {
+            return res.json({status: 'ok', message: 'Not found any auction'});
+        }
+        else{
+            console.log(jsonData)
+            return res.json(jsonData)
+        }
+    });
 });
 
 // Logout route
